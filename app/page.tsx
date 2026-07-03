@@ -1,13 +1,18 @@
+
+
+// app/page.tsx
 'use client';
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-
 import { useAuth } from '@/hooks/useAuth';
 import { api } from '@/lib/api';
 import { Question } from '@/types';
 import { QuestionCard } from '@/components/chat/QuestionCard';
+import { ExpertDashboard } from '@/components/ExpertDashboard';
+import { useRealTime } from '@/hooks/useRealTime';
+import toast from 'react-hot-toast';
 
 export default function HomePage() {
   const router = useRouter();
@@ -15,13 +20,36 @@ export default function HomePage() {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [filter, setFilter] = useState('all');
+  const [activeTab, setActiveTab] = useState<'user' | 'expert'>(
+    user?.role === 'expert' || user?.role === 'both' ? 'expert' : 'user'
+  );
+
+  // Determine if user is an expert
+  const isExpert = user?.role === 'expert' || user?.role === 'both';
+  const isBoth = user?.role === 'both';
+
+  // Real-time updates for user questions
+  const { isConnected } = useRealTime({
+    userId: user?.id,
+    onNewMessage: () => {
+      // Refresh questions when new message arrives
+      loadQuestions();
+    },
+    onStatusUpdate: () => {
+      loadQuestions();
+    },
+  });
 
   useEffect(() => {
     if (!loading && !user) {
       router.push('/login');
       return;
     }
-    loadQuestions();
+    
+    // Load questions based on role
+    if (user && !isExpert) {
+      loadQuestions();
+    }
   }, [user, loading, filter]);
 
   const loadQuestions = async () => {
@@ -33,6 +61,16 @@ export default function HomePage() {
       console.error('Failed to load questions:', error);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleAcceptQuestion = async (id: string) => {
+    try {
+      await api.acceptQuestion(id);
+      toast.success('Question accepted!');
+      await loadQuestions();
+    } catch (error) {
+      toast.error('Failed to accept question');
     }
   };
 
@@ -61,6 +99,10 @@ export default function HomePage() {
               <Link href="/" className="text-2xl font-bold text-blue-600">
                 ExpertLoop
               </Link>
+              <span className="ml-2 text-xs text-green-600 flex items-center">
+                <span className={`w-2 h-2 rounded-full mr-1 ${isConnected ? 'bg-green-500' : 'bg-gray-400'}`}></span>
+                {isConnected ? 'Live' : 'Offline'}
+              </span>
             </div>
             
             <div className="flex items-center space-x-4">
@@ -86,58 +128,93 @@ export default function HomePage() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Filters */}
-        <div className="flex flex-wrap gap-2 mb-6">
-          {['all', 'open', 'assigned', 'in_progress', 'resolved'].map((f) => (
+        {/* Role Tabs for Both Role */}
+        {isBoth && (
+          <div className="flex space-x-2 mb-6 border-b border-gray-200">
             <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
-                filter === f
-                  ? 'bg-blue-500 text-white'
-                  : 'bg-white text-gray-700 hover:bg-gray-100'
+              onClick={() => setActiveTab('expert')}
+              className={`px-4 py-2 text-sm font-medium transition-colors ${
+                activeTab === 'expert'
+                  ? 'text-blue-600 border-b-2 border-blue-600'
+                  : 'text-gray-500 hover:text-gray-700'
               }`}
             >
-              {f.charAt(0).toUpperCase() + f.slice(1)}
+              🎯 Expert Dashboard
             </button>
-          ))}
-        </div>
-
-        {/* Questions List */}
-        {isLoading ? (
-          <div className="flex justify-center py-12">
-            <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-          </div>
-        ) : questions.length === 0 ? (
-          <div className="text-center py-12">
-            <div className="text-6xl mb-4">🤔</div>
-            <h3 className="text-xl font-semibold text-gray-900 mb-2">
-              No questions yet
-            </h3>
-            <p className="text-gray-600 mb-4">
-              Be the first to ask a question or wait for others
-            </p>
             <button
-              onClick={() => router.push('/ask')}
-              className="btn-primary"
+              onClick={() => setActiveTab('user')}
+              className={`px-4 py-2 text-sm font-medium transition-colors ${
+                activeTab === 'user'
+                  ? 'text-blue-600 border-b-2 border-blue-600'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
             >
-              Ask a Question
+              📋 My Questions
             </button>
           </div>
-        ) : (
-          <div className="space-y-4">
-            {questions.map((question) => (
-              <QuestionCard
-                key={question._id}
-                question={question}
-                showAccept={user.role === 'expert' || user.role === 'both'}
-                onAccept={async (id) => {
-                  await api.acceptQuestion(id);
-                  await loadQuestions();
-                }}
-              />
-            ))}
+        )}
+
+        {/* Expert Dashboard View */}
+        {(isExpert && (activeTab === 'expert' || !isBoth)) && (
+          <div className="animate-fadeIn">
+            <ExpertDashboard />
           </div>
+        )}
+
+        {/* User Questions View */}
+        {(!isExpert || (isBoth && activeTab === 'user')) && (
+          <>
+            {/* Filters */}
+            <div className="flex flex-wrap gap-2 mb-6">
+              {['all', 'open', 'assigned', 'in_progress', 'resolved'].map((f) => (
+                <button
+                  key={f}
+                  onClick={() => setFilter(f)}
+                  className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
+                    filter === f
+                      ? 'bg-blue-500 text-white'
+                      : 'bg-white text-gray-700 hover:bg-gray-100'
+                  }`}
+                >
+                  {f.charAt(0).toUpperCase() + f.slice(1)}
+                </button>
+              ))}
+            </div>
+
+            {/* Questions List */}
+            {isLoading ? (
+              <div className="flex justify-center py-12">
+                <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+              </div>
+            ) : questions.length === 0 ? (
+              <div className="text-center py-12">
+                <div className="text-6xl mb-4">🤔</div>
+                <h3 className="text-xl font-semibold text-gray-900 mb-2">
+                  No questions yet
+                </h3>
+                <p className="text-gray-600 mb-4">
+                  Be the first to ask a question or wait for others
+                </p>
+                <button
+                  onClick={() => router.push('/ask')}
+                  className="btn-primary"
+                >
+                  Ask a Question
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {questions.map((question) => (
+                  <QuestionCard
+                    key={question._id}
+                    question={question}
+                    showAccept={user.role === 'expert' || user.role === 'both'}
+                    onAccept={handleAcceptQuestion}
+                  />
+                ))}
+              </div>
+            )}
+          </>
         )}
       </main>
     </div>

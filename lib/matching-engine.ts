@@ -1,94 +1,6 @@
-// import { ExpertProfile } from '@/models/ExpertProfile';
-// import { Question } from '@/models/Question';
-
-// interface MatchScore {
-//   expertId: string;
-//   score: number;
-//   matchedSkills: string[];
-// }
-
-// export class MatchingEngine {
-//   static async findMatches(questionId: string, limit: number = 5) {
-//     const question = await Question.findById(questionId);
-//     if (!question) throw new Error('Question not found');
-
-//     const experts = await ExpertProfile.find({
-//     isActive: true,
-//     'availability.status': 'available',
-//     $expr: {
-//         $lt: [
-//         '$availability.currentQuestionsToday',
-//         '$availability.maxQuestionsPerDay',
-//         ],
-//     },
-//     }).populate('userId');
-
-//     const scores: MatchScore[] = [];
-
-//     for (const expert of experts) {
-//       const score = this.calculateMatchScore(expert, question);
-//       if (score.score > 0) {
-//         scores.push(score);
-//       }
-//     }
-
-//     // Sort by score and take top matches
-//     const matches = scores
-//       .sort((a, b) => b.score - a.score)
-//       .slice(0, limit);
-
-//     // Update question with matched experts
-//     await Question.findByIdAndUpdate(questionId, {
-//       matchedExperts: matches.map(m => m.expertId)
-//     });
-
-//     return matches;
-//   }
-
-//   private static calculateMatchScore(expert: any, question: any): MatchScore {
-//     let score = 0;
-//     const matchedSkills: string[] = [];
-
-//     // Primary expertise match (40% weight)
-//     const primaryMatch = expert.primaryExpertise.filter((skill: string) =>
-//       question.tags.includes(skill) || 
-//       question.category.toLowerCase().includes(skill.toLowerCase())
-//     );
-//     score += (primaryMatch.length / Math.min(expert.primaryExpertise.length, 3)) * 40;
-//     matchedSkills.push(...primaryMatch);
-
-//     // Secondary skills match (20% weight)
-//     const secondaryMatch = expert.secondarySkills.filter((skill: string) =>
-//       question.tags.includes(skill) ||
-//       question.category.toLowerCase().includes(skill.toLowerCase())
-//     );
-//     score += (secondaryMatch.length / Math.min(expert.secondarySkills.length, 10)) * 20;
-//     matchedSkills.push(...secondaryMatch);
-
-//     // Rating (15% weight)
-//     score += (expert.rating / 5) * 15;
-
-//     // Response speed (15% weight)
-//     const avgResponseTime = expert.responseTime || 60; // seconds
-//     const speedScore = Math.max(0, 100 - avgResponseTime) / 100;
-//     score += speedScore * 15;
-
-//     // Experience (10% weight)
-//     const experienceScore = Math.min(expert.yearsOfExperience / 10, 1);
-//     score += experienceScore * 10;
-
-//     return {
-//       expertId: expert.userId._id,
-//       score: Math.round(score),
-//       matchedSkills
-//     };
-//   }
-// }
-
 // lib/matching-engine.ts
 import { ExpertProfile } from '@/models/ExpertProfile';
 import { Question } from '@/models/Question';
-import { User } from '@/models/User';
 import mongoose from 'mongoose';
 
 interface MatchScore {
@@ -106,8 +18,15 @@ interface MatchScore {
 
 export class MatchingEngine {
   static async findMatches(questionId: string, limit: number = 5) {
+    console.log('🔍 Finding matches for question:', questionId);
+    
     const question = await Question.findById(questionId);
-    if (!question) throw new Error('Question not found');
+    if (!question) {
+      console.error('❌ Question not found');
+      throw new Error('Question not found');
+    }
+
+    console.log('📝 Question tags:', question.tags);
 
     // Find available experts
     const experts = await ExpertProfile.find({
@@ -121,12 +40,15 @@ export class MatchingEngine {
       },
     }).populate('userId', 'name email avatar');
 
+    console.log(`👥 Found ${experts.length} available experts`);
+
     const scores: MatchScore[] = [];
 
     for (const expert of experts) {
       const score = this.calculateMatchScore(expert, question);
       if (score.score > 0) {
         scores.push(score);
+        console.log(`📊 Expert ${expert.userId.name} score: ${score.score}, matched skills: ${score.matchedSkills}`);
       }
     }
 
@@ -134,6 +56,16 @@ export class MatchingEngine {
     const topMatches = scores
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
+
+    console.log(`🎯 Top ${topMatches.length} matches found`);
+
+    if (topMatches.length === 0) {
+      console.log('⚠️ No matches found for this question');
+      return {
+        matches: [],
+        expertIds: [],
+      };
+    }
 
     // Update question with matched experts
     const matchedExpertIds = topMatches.map(m => new mongoose.Types.ObjectId(m.expertId));
@@ -148,6 +80,8 @@ export class MatchingEngine {
       matchedExperts: matchedExpertIds,
       $push: { expertNotifications: { $each: expertNotifications } }
     });
+
+    console.log(`✅ Updated question with ${matchedExpertIds.length} matched experts`);
 
     return {
       matches: topMatches,
@@ -207,39 +141,55 @@ export class MatchingEngine {
   private static calculateMatchScore(expert: any, question: any): MatchScore {
     let skillMatch = 0;
     let matchedSkills: string[] = [];
-    let totalSkillsWeight = 0;
 
-    // Primary expertise match (50% of skill weight)
+    // Check primary expertise match (50% weight)
     const primaryWeight = 0.5;
-    const primaryMatch = expert.primaryExpertise.filter((skill: string) => {
+    let primaryMatches = 0;
+    const primaryTotal = Math.min(expert.primaryExpertise.length, 3);
+    
+    for (const skill of expert.primaryExpertise) {
       const matches = question.tags.some((tag: string) => 
         tag.toLowerCase().includes(skill.toLowerCase()) || 
         skill.toLowerCase().includes(tag.toLowerCase()) ||
         question.category.toLowerCase().includes(skill.toLowerCase())
       );
-      if (matches) totalSkillsWeight += primaryWeight;
-      return matches;
-    });
-    skillMatch += (primaryMatch.length / Math.min(expert.primaryExpertise.length, 3)) * primaryWeight * 100;
+      if (matches) {
+        primaryMatches++;
+        matchedSkills.push(skill);
+      }
+    }
+    
+    const primaryScore = primaryTotal > 0 ? (primaryMatches / primaryTotal) * primaryWeight * 100 : 0;
+    skillMatch += primaryScore;
 
-    // Secondary skills match (30% of skill weight)
+    // Check secondary skills match (30% weight)
     const secondaryWeight = 0.3;
-    const secondaryMatch = expert.secondarySkills.filter((skill: string) => {
+    let secondaryMatches = 0;
+    const secondaryTotal = Math.min(expert.secondarySkills.length, 10);
+    
+    for (const skill of expert.secondarySkills) {
       const matches = question.tags.some((tag: string) => 
         tag.toLowerCase().includes(skill.toLowerCase()) || 
         skill.toLowerCase().includes(tag.toLowerCase())
       );
-      if (matches) totalSkillsWeight += secondaryWeight;
-      return matches;
-    });
-    skillMatch += (secondaryMatch.length / Math.min(expert.secondarySkills.length, 10)) * secondaryWeight * 100;
+      if (matches) {
+        secondaryMatches++;
+        matchedSkills.push(skill);
+      }
+    }
+    
+    const secondaryScore = secondaryTotal > 0 ? (secondaryMatches / secondaryTotal) * secondaryWeight * 100 : 0;
+    skillMatch += secondaryScore;
 
-    // Expertise stats match (20% of skill weight) - based on historical performance
+    // Expertise stats match (20% weight)
     const statsWeight = 0.2;
     let statsMatch = 0;
+    let totalStats = 0;
+    
     for (const stat of expert.expertiseStats || []) {
-      if (question.tags.includes(stat.tag)) {
+      if (question.tags.some((tag: string) => tag.includes(stat.tag) || stat.tag.includes(tag))) {
         statsMatch += (stat.questionsSolved / (stat.questionsSolved + 10)) * statsWeight * 100;
+        totalStats++;
       }
     }
     skillMatch += statsMatch;
@@ -247,33 +197,34 @@ export class MatchingEngine {
     // Normalize skillMatch to 0-100
     skillMatch = Math.min(skillMatch, 100);
 
+    console.log(`📊 Skill match for ${expert.userId.name}: ${skillMatch}%`);
+
     // Availability score (25% of total)
     let availabilityScore = 0;
     if (expert.availability.status === 'available') {
       availabilityScore = 100;
-      // Reduce score if near daily limit
       const remaining = expert.availability.maxQuestionsPerDay - expert.availability.currentQuestionsToday;
       if (remaining < 2) {
-        availabilityScore = 50; // Only accept urgent if near capacity
+        availabilityScore = 50;
       }
     } else if (expert.availability.status === 'busy') {
-      availabilityScore = 50; // Only for urgent questions
+      availabilityScore = 50;
     }
 
     // Rating score (20% of total)
     const ratingScore = (expert.rating / 5) * 100;
 
     // Response speed score (20% of total)
-    const avgResponseTime = expert.responseTime || 60; // seconds
+    const avgResponseTime = expert.responseTime || 60;
     const speedScore = Math.max(0, Math.min(100, (300 - avgResponseTime) / 300 * 100));
 
     // Experience score (10% of total)
     const experienceScore = Math.min(expert.yearsOfExperience / 10, 1) * 100;
 
-    // Urgency modifier - high urgency prioritizes speed and availability
+    // Urgency modifier
     let urgencyModifier = 1;
     if (question.urgency === 'high') {
-      urgencyModifier = 1.2; // Boost matching score for urgent questions
+      urgencyModifier = 1.2;
     }
 
     // Calculate total score with weights
@@ -293,10 +244,28 @@ export class MatchingEngine {
       (experienceScore * weights.experienceScore)
     ) * urgencyModifier;
 
+    totalScore = Math.round(Math.min(totalScore, 100));
+
+    // Only return if score is above threshold
+    if (totalScore < 20) {
+      return {
+        expertId: expert.userId._id.toString(),
+        score: 0,
+        matchedSkills: [],
+        matchDetails: {
+          skillMatch: 0,
+          availabilityScore: 0,
+          ratingScore: 0,
+          responseSpeedScore: 0,
+          experienceScore: 0,
+        }
+      };
+    }
+
     return {
       expertId: expert.userId._id.toString(),
-      score: Math.round(Math.min(totalScore, 100)),
-      matchedSkills: [...primaryMatch, ...secondaryMatch],
+      score: totalScore,
+      matchedSkills: [...new Set(matchedSkills)],
       matchDetails: {
         skillMatch: Math.round(skillMatch),
         availabilityScore: Math.round(availabilityScore),
@@ -315,15 +284,12 @@ export class MatchingEngine {
     const expertProfile = await ExpertProfile.findOne({ userId: expertId });
     if (!expertProfile) return;
 
-    // Update total sessions
     expertProfile.totalSessions += 1;
 
-    // Update expertise stats for tags
     for (const tag of question.tags) {
-      const statIndex = expertProfile.expertiseStats.findIndex(s => s.tag === tag);
+      const statIndex = expertProfile.expertiseStats.findIndex((s: { tag: any; }) => s.tag === tag);
       if (statIndex >= 0) {
         expertProfile.expertiseStats[statIndex].questionsSolved += 1;
-        // Update average rating if available
         if (question.expertRating) {
           const current = expertProfile.expertiseStats[statIndex];
           current.averageRating = (current.averageRating * (current.questionsSolved - 1) + question.expertRating) / current.questionsSolved;
@@ -340,7 +306,6 @@ export class MatchingEngine {
 
     await expertProfile.save();
 
-    // Update expert rating average
     const allQuestions = await Question.find({
       assignedExpert: expertId,
       expertRating: { $exists: true, $ne: null }

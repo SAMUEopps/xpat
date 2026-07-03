@@ -1,4 +1,5 @@
-// app/questions/[id]/page.tsx
+
+// app/ask/[id]/page.tsx
 'use client';
 
 import { useState, useEffect } from 'react';
@@ -6,6 +7,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import { api } from '@/lib/api';
 import { ChatWindow } from '@/components/chat/ChatWindow';
+import { useRealTime } from '@/hooks/useRealTime';
 import toast from 'react-hot-toast';
 
 export default function QuestionDetailPage() {
@@ -14,6 +16,63 @@ export default function QuestionDetailPage() {
   const { user } = useAuth();
   const [question, setQuestion] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isAccepting, setIsAccepting] = useState(false);
+  const [hasJoinedRoom, setHasJoinedRoom] = useState(false);
+
+  // Real-time updates
+  const { 
+    isConnected, 
+    isAuthenticated,
+    acceptQuestion,
+    socket,
+  } = useRealTime({
+    userId: user?.id,
+    questionId: params.id as string,
+    
+    onNewMessage: (message) => {
+      console.log('💬 New message received in page:', message);
+      setQuestion((prev: any) => {
+        if (!prev) return prev;
+        // Avoid duplicates
+        if (message._id && prev.messages?.some((m: any) => m._id === message._id)) {
+          return prev;
+        }
+        return {
+          ...prev,
+          messages: [...(prev.messages || []), message]
+        };
+      });
+    },
+    
+    onStatusUpdate: (data) => {
+      console.log('📊 Status update in page:', data);
+      setQuestion((prev: any) => ({
+        ...prev,
+        status: data.status
+      }));
+      //toast.info(`Question status updated to: ${data.status}`);
+    },
+    
+    onExpertAssigned: (data) => {
+      console.log('👨‍💼 Expert assigned in page:', data);
+      setQuestion((prev: any) => ({
+        ...prev,
+        assignedExpert: { _id: data.expertId, name: data.expertName },
+        status: 'assigned'
+      }));
+      toast.success(`Expert ${data.expertName} has joined the conversation!`);
+    },
+    
+    onQuestionAccepted: (data) => {
+      console.log('✅ Question accepted in page:', data);
+      setQuestion((prev: any) => ({
+        ...prev,
+        assignedExpert: { _id: data.expertId, name: data.expertName },
+        status: 'assigned'
+      }));
+      toast.success(`Expert ${data.expertName} accepted your question!`);
+    },
+  });
 
   useEffect(() => {
     if (!user) {
@@ -23,16 +82,87 @@ export default function QuestionDetailPage() {
     loadQuestion();
   }, [user, params.id]);
 
+  // ✅ Join the room when authenticated and question is loaded
+  useEffect(() => {
+    if (!isAuthenticated || !question || !socket || hasJoinedRoom) {
+      console.log('⏳ Waiting to join room:', {
+        isAuthenticated,
+        hasQuestion: !!question,
+        hasSocket: !!socket,
+        hasJoinedRoom,
+      });
+      return;
+    }
+
+    console.log('📝 Joining question room:', question._id);
+    socket.emit('join_question', { questionId: question._id });
+    setHasJoinedRoom(true);
+    
+    // Listen for chat history
+    socket.on('chat_history', (data) => {
+      console.log('📚 Chat history received:', data);
+      if (data.questionId === question._id) {
+        setQuestion((prev: any) => ({
+          ...prev,
+          messages: data.messages || [],
+        }));
+      }
+    });
+
+    return () => {
+      socket.off('chat_history');
+    };
+  }, [isAuthenticated, question, socket, hasJoinedRoom]);
+
   const loadQuestion = async () => {
     setIsLoading(true);
     try {
       const data = await api.getQuestion(params.id as string);
+      console.log('📄 Question loaded:', data);
       setQuestion(data);
     } catch (error) {
+      console.error('Failed to load question:', error);
       toast.error('Failed to load question');
       router.push('/');
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleAcceptQuestion = async () => {
+    if (!user || !question) return;
+    
+    setIsAccepting(true);
+    try {
+      // Accept via socket
+      acceptQuestion({ questionId: question._id });
+      
+      // Also call API for persistence
+      await api.acceptQuestion(question._id);
+      
+      // Update local state
+      setQuestion((prev: any) => ({
+        ...prev,
+        assignedExpert: { 
+          _id: user.id, 
+          name: user.name,
+          email: user.email 
+        },
+        status: 'assigned'
+      }));
+      
+      toast.success('Question accepted! You can now chat.');
+      
+      // Join the room after accepting
+      if (socket) {
+        socket.emit('join_question', { questionId: question._id });
+        setHasJoinedRoom(true);
+      }
+    } catch (error) {
+      console.error('Failed to accept question:', error);
+      toast.error('Failed to accept question');
+    } finally {
+      setIsAccepting(false);
     }
   };
 
@@ -56,9 +186,39 @@ export default function QuestionDetailPage() {
     );
   }
 
-  const isExpert = question.assignedExpert?._id === user?.id;
-  const isOwner = question.userId._id === user?.id;
-  const canChat = isExpert || isOwner;
+  // Check if user is the owner
+  const isOwner = question.userId?._id === user?.id;
+  
+  // Check if user is the assigned expert
+  const isAssignedExpert = question.assignedExpert?._id === user?.id;
+  
+  // Check if user is a matched expert (can accept)
+  const isMatchedExpert = question.matchedExperts?.some(
+    (expert: any) => expert._id === user?.id
+  );
+  
+  // Check if user is an expert (either role)
+  const isExpert = user?.role === 'expert' || user?.role === 'both';
+  
+  // Determine if user can access chat
+  const canChat = isOwner || isAssignedExpert;
+  
+  // Determine if user can accept the question
+  const canAccept = isExpert && 
+    question.status === 'open' && 
+    (isMatchedExpert || isExpert);
+
+  console.log('🔍 Page state:', {
+    isOwner,
+    isAssignedExpert,
+    isMatchedExpert,
+    isExpert,
+    canChat,
+    canAccept,
+    questionStatus: question.status,
+    hasJoinedRoom,
+    isAuthenticated,
+  });
 
   return (
     <div className="min-h-screen bg-gray-50 py-8">
@@ -84,6 +244,20 @@ export default function QuestionDetailPage() {
                 }`}>
                   {question.urgency}
                 </span>
+                {isConnected ? (
+                  <span className="text-xs text-green-600 flex items-center">
+                    <span className="w-2 h-2 bg-green-500 rounded-full mr-1 animate-pulse"></span>
+                    Live
+                  </span>
+                ) : (
+                  <span className="text-xs text-gray-400">Offline</span>
+                )}
+                {hasJoinedRoom && (
+                  <span className="text-xs text-blue-600 flex items-center">
+                    <span className="w-2 h-2 bg-blue-500 rounded-full mr-1"></span>
+                    In Room
+                  </span>
+                )}
               </div>
               <div className="text-sm text-gray-500">
                 {new Date(question.createdAt).toLocaleDateString()}
@@ -99,7 +273,7 @@ export default function QuestionDetailPage() {
               ))}
             </div>
             <div className="mt-4 flex items-center text-sm text-gray-500">
-              <span>Asked by {question.userId.name}</span>
+              <span>Asked by {question.userId?.name || 'Unknown'}</span>
               {question.assignedExpert && (
                 <>
                   <span className="mx-2">•</span>
@@ -109,37 +283,108 @@ export default function QuestionDetailPage() {
             </div>
           </div>
 
-          {/* Chat */}
+          {/* Accept Button (for experts) */}
+          {canAccept && (
+            <div className="p-4 bg-blue-50 border-b border-blue-100">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm text-blue-800">
+                    You can accept this question and start helping!
+                  </p>
+                  {question.matchedSkills && (
+                    <p className="text-xs text-blue-600 mt-1">
+                      Matched skills: {question.matchedSkills.join(', ')}
+                    </p>
+                  )}
+                </div>
+                <button
+                  onClick={handleAcceptQuestion}
+                  disabled={isAccepting}
+                  className="px-6 py-2 bg-blue-500 text-white font-medium rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isAccepting ? (
+                    <span className="flex items-center">
+                      <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></span>
+                      Accepting...
+                    </span>
+                  ) : (
+                    'Accept Question'
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Chat or Access Denied */}
           {canChat ? (
             <div className="h-[500px]">
               <ChatWindow
                 questionId={question._id}
                 expertId={question.assignedExpert?._id}
-                userId={question.userId._id}
+                userId={question.userId?._id}
                 initialMessages={question.messages || []}
                 onStatusUpdate={handleStatusUpdate}
               />
             </div>
           ) : (
-            <div className="p-6 text-center text-gray-500">
-              <p>You don't have access to this conversation.</p>
+            <div className="p-12 text-center">
+              <div className="text-6xl mb-4">🔒</div>
+              <h3 className="text-xl font-semibold text-gray-900 mb-2">
+                You don't have access to this conversation
+              </h3>
               {question.status === 'open' && (
-                <p className="mt-2 text-sm">Wait for an expert to accept your question.</p>
+                <div>
+                  <p className="text-gray-600 mb-2">
+                    This question is still open and waiting for an expert.
+                  </p>
+                  {isExpert && !isMatchedExpert && (
+                    <p className="text-sm text-blue-600">
+                      You are an expert but haven't been matched with this question yet.
+                    </p>
+                  )}
+                  {!isExpert && (
+                    <p className="text-sm text-gray-500">
+                      Become an expert to help answer questions!
+                    </p>
+                  )}
+                </div>
+              )}
+              {question.status === 'assigned' && (
+                <p className="text-gray-600">
+                  This question has been assigned to an expert. 
+                  {!isOwner && ' Only the owner and assigned expert can access the chat.'}
+                </p>
+              )}
+              {question.status === 'in_progress' && (
+                <p className="text-gray-600">
+                  This question is being worked on by an expert.
+                </p>
+              )}
+              {question.status === 'resolved' && (
+                <p className="text-gray-600">
+                  This question has been resolved.
+                </p>
               )}
             </div>
           )}
         </div>
 
         {/* Actions */}
-        {(isOwner || isExpert) && question.status !== 'resolved' && question.status !== 'cancelled' && (
+        {(isOwner || isAssignedExpert) && 
+         question.status !== 'resolved' && 
+         question.status !== 'cancelled' && (
           <div className="mt-6 flex justify-end space-x-3">
             {isOwner && (
               <button
                 onClick={async () => {
                   if (confirm('Mark this question as resolved?')) {
-                    await api.updateQuestion(question._id, { status: 'resolved' });
-                    toast.success('Question marked as resolved');
-                    router.push('/');
+                    try {
+                      await api.updateQuestion(question._id, { status: 'resolved' });
+                      toast.success('Question marked as resolved');
+                      router.push('/');
+                    } catch (error) {
+                      toast.error('Failed to mark as resolved');
+                    }
                   }
                 }}
                 className="btn-primary"
@@ -151,9 +396,13 @@ export default function QuestionDetailPage() {
               <button
                 onClick={async () => {
                   if (confirm('Cancel this question?')) {
-                    await api.updateQuestion(question._id, { status: 'cancelled' });
-                    toast.success('Question cancelled');
-                    router.push('/');
+                    try {
+                      await api.updateQuestion(question._id, { status: 'cancelled' });
+                      toast.success('Question cancelled');
+                      router.push('/');
+                    } catch (error) {
+                      toast.error('Failed to cancel question');
+                    }
                   }
                 }}
                 className="btn-secondary text-red-600"

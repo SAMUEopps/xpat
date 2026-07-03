@@ -26,6 +26,7 @@ export interface Question {
   updatedAt: string;
 }
 
+
 export interface Message {
   senderId: string;
   content: string;

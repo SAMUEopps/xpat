@@ -57,13 +57,30 @@ export const api = {
   return data.user;
   },
 
+    // ✅ NEW: Update question (for status changes)
+  updateQuestion: async (id: string, updateData: any) => {
+    const { data } = await apiClient.put(`/api/questions/${id}`, updateData);
+    return data;
+  },
+
   // Questions
-  getQuestions: async (filter?: string) => {
+  /*getQuestions: async (filter?: string) => {
     const { data } = await apiClient.get('/api/questions', {
       params: { status: filter !== 'all' ? filter : undefined },
     });
     return data.questions;
-  },
+  },*/
+
+  // lib/api.ts - Update getQuestions
+getQuestions: async (filter?: string, role?: string) => {
+  const { data } = await apiClient.get('/api/questions', {
+    params: { 
+      status: filter !== 'all' ? filter : undefined,
+      role: role || undefined,
+    },
+  });
+  return data.questions;
+},
 
   createQuestion: async (questionData: any) => {
     const { data } = await apiClient.post('/api/questions', questionData);
